@@ -51,9 +51,11 @@ pipeline {
                             : "${CORS_ORIGINS:?CORS_ORIGINS muss gesetzt sein}"
                             : "${METERPULSE_DATABASE_URL:?Das MeterPulse-Datenbank-Credential ist leer}"
                             : "${BUECHEREI_DATABASE_URL:?Das Bücherei-Datenbank-Credential ist leer}"
-
+                            echo "Preparing shared-services deployment"
                             ssh_options="-o BatchMode=yes -o StrictHostKeyChecking=yes"
+                            echo "Setting up SSH options"
                             service_env=$(mktemp)
+                            echo "Creating temporary service environment file"
                             trap 'rm -f "$service_env"' EXIT
                             umask 077
                             {
@@ -63,9 +65,13 @@ pipeline {
                                 printf 'BUECHEREI_DATABASE_URL=%s\\n' "$BUECHEREI_DATABASE_URL"
                                 printf 'CORS_ORIGIN=%s\\n' "$CORS_ORIGINS"
                             } > "$service_env"
+                            echo "Service environment file created at $service_env"
 
+                            echo "Copying shared-services archive to remote host"
                             scp $ssh_options services.tar.gz "jenkins-deploy@${SERVICE_HOST}:/tmp/shared-services-${BUILD_NUMBER}.tar.gz"
+                            echo "Copying service environment file to remote host"
                             scp $ssh_options "$service_env" "jenkins-deploy@${SERVICE_HOST}:/tmp/shared-services-${BUILD_NUMBER}.env"
+                            echo "Starting remote deployment of shared-services"
                             ssh $ssh_options "jenkins-deploy@${SERVICE_HOST}" "bash -s -- '$BUILD_NUMBER'" <<'REMOTE'
                     set -eu
                     build_number="$1"
