@@ -12,7 +12,6 @@ pipeline {
 
     parameters {
         booleanParam(name: 'DEPLOY', defaultValue: true, description: 'Soll der gemeinsame Service deployed werden?')
-        string(name: 'CORS_ORIGINS', defaultValue: 'http://localhost:4200,http://127.0.0.1:4200,http://localhost:4300,http://127.0.0.1:4300', description: 'Kommagetrennte Frontend-Ursprünge')
     }
 
     stages {
