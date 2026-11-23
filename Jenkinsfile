@@ -42,16 +42,20 @@ pipeline {
                 sshagent(credentials: ["${DEPLOY_SSH_KEY}"]) {
                     withCredentials([
                         string(credentialsId: 'meterpulse-database-url', variable: 'METERPULSE_DATABASE_URL'),
-                        string(credentialsId: 'buecherei-database-url', variable: 'BUECHEREI_DATABASE_URL')
+                        string(credentialsId: 'buecherei-database-url', variable: 'BUECHEREI_DATABASE_URL'),
+                        string(credentialsId: 'depotblick-database-url', variable: 'DEPOTBLICK_DATABASE_URL'),
+                        string(credentialsId: 'depotblick-session-encryption-key', variable: 'DEPOTBLICK_SESSION_ENCRYPTION_KEY')
                     ]) {
                         sh '''
                         echo "Starting deployment script"
                             set +x
                             set -eu
-                            : "${SERVICE_HOST:?SERVICE_HOSTmuss gesetzt sein}"
+                            : "${SERVICE_HOST:?SERVICE_HOST muss gesetzt sein}"
                             : "${CORS_ORIGINS:?CORS_ORIGINS muss gesetzt sein}"
                             : "${METERPULSE_DATABASE_URL:?Das MeterPulse-Datenbank-Credential ist leer}"
                             : "${BUECHEREI_DATABASE_URL:?Das Bücherei-Datenbank-Credential ist leer}"
+                            : "${DEPOTBLICK_DATABASE_URL:?Das Depotblick-Datenbank-Credential ist leer}"
+                            : "${DEPOTBLICK_SESSION_ENCRYPTION_KEY:?Das Depotblick-Verschlüsselungs-Credential ist leer}"
                             ssh_options="-o BatchMode=yes -o StrictHostKeyChecking=yes"
                             service_env=$(mktemp)
                             trap 'rm -f "$service_env"' EXIT
@@ -61,6 +65,8 @@ pipeline {
                                 printf 'API_PORT=3000\\n'
                                 printf 'DATABASE_URL=%s\\n' "$METERPULSE_DATABASE_URL"
                                 printf 'BUECHEREI_DATABASE_URL=%s\\n' "$BUECHEREI_DATABASE_URL"
+                                printf 'DEPOTBLICK_DATABASE_URL=%s\\n' "$DEPOTBLICK_DATABASE_URL"
+                                printf 'DEPOTBLICK_SESSION_ENCRYPTION_KEY=%s\\n' "$DEPOTBLICK_SESSION_ENCRYPTION_KEY"
                                 printf 'CORS_ORIGIN=%s\\n' "${CORS_ORIGINS}"
                             } > "$service_env"
                             scp $ssh_options services.tar.gz "jenkins-deploy@${SERVICE_HOST}:/tmp/shared-services-${BUILD_NUMBER}.tar.gz"

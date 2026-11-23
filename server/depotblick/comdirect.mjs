@@ -51,16 +51,75 @@ function safeErrorMessage(status) {
     return 'Die comdirect-Schnittstelle ist derzeit nicht erreichbar oder hat die Anfrage abgelehnt.';
 }
 
+function isComdirectApiError(error) {
+    return error instanceof ApiError && error.code.startsWith('COMDIRECT_');
+}
+
 export class ComdirectAuthService {
-    constructor({ origin = process.env.COMDIRECT_API_ORIGIN ?? 'https://api.comdirect.de', fetchImpl = fetch, logger = console } = {}) {
+    constructor({
+        origin = process.env.COMDIRECT_API_ORIGIN ?? 'https://api.comdirect.de',
+        fetchImpl = fetch,
+        logger = console,
+        store = null,
+    } = {}) {
         this.origin = origin.replace(/\/$/, '');
         this.fetch = fetchImpl;
         this.logger = logger;
+        this.store = store;
         this.flows = new Map();
         this.accounts = new Map();
+        this.initialization = null;
     }
 
-    createAccount({ clientId, clientSecret, username, password, label } = {}) {
+    async initialize() {
+        if (!this.store) return;
+        if (!this.initialization) {
+            this.initialization = (async () => {
+                const { accounts, flows } = await this.store.initialize();
+                for (const savedAccount of accounts) {
+                    this.accounts.set(savedAccount.id, { ...savedAccount, connectPromise: null });
+                }
+                for (const savedFlow of flows) {
+                    if (savedFlow.accountId && !this.accounts.has(savedFlow.accountId)) {
+                        await this.store.endFlow(savedFlow.flowId, savedFlow.accountId, 'error');
+                        continue;
+                    }
+                    if (savedFlow.payload.flowId !== savedFlow.flowId) {
+                        throw new Error('Stored Depotblick session ID does not match its encrypted payload.');
+                    }
+                    const flow = {
+                        ...savedFlow.payload,
+                        flowId: savedFlow.flowId,
+                        accountId: savedFlow.accountId,
+                        closed: false,
+                        expiryTimer: null,
+                        keepAliveTimer: null,
+                        refreshPromise: null,
+                    };
+                    this.flows.set(flow.flowId, flow);
+                    const account = this.accounts.get(flow.accountId);
+                    if (account) {
+                        account.flowId = flow.flowId;
+                        account.status = flow.stage;
+                    }
+                    await this.storeFlow(flow);
+                }
+                for (const account of this.accounts.values()) {
+                    if (
+                        (account.status === 'connected' || account.status === 'tan-required')
+                        && (!account.flowId || !this.flows.has(account.flowId))
+                    ) {
+                        account.flowId = null;
+                        account.status = 'error';
+                        await this.store.saveAccount(account);
+                    }
+                }
+            })();
+        }
+        await this.initialization;
+    }
+
+    async createAccount({ clientId, clientSecret, username, password, label } = {}) {
         if (![clientId, clientSecret, username, password].every((value) => typeof value === 'string' && value.trim())) {
             throw new ApiError(400, 'LOGIN_FIELDS_REQUIRED', 'Bitte Client ID, Client Secret, Benutzername und Kennwort ausfüllen.');
         }
@@ -78,9 +137,20 @@ export class ComdirectAuthService {
                 password,
             },
             flowId: null,
+            status: 'disconnected',
             connectPromise: null,
         };
         this.accounts.set(id, account);
+        try {
+            await this.persistAccount(account);
+        } catch (error) {
+            this.accounts.delete(id);
+            account.credentials.clientId = '';
+            account.credentials.clientSecret = '';
+            account.credentials.username = '';
+            account.credentials.password = '';
+            throw error;
+        }
         return this.publicAccount(account);
     }
 
@@ -94,13 +164,25 @@ export class ComdirectAuthService {
     async connectAccount(accountId) {
         const account = this.accounts.get(accountId);
         if (!account) throw new ApiError(404, 'ACCOUNT_NOT_FOUND', 'Der gespeicherte Zugang wurde nicht gefunden.');
+        if (account.status === 'error') {
+            throw new ApiError(410, 'ACCOUNT_SESSION_ENDED', 'Die Session wurde beendet. Entferne den Zugang und füge ihn erneut hinzu.');
+        }
         const currentFlow = this.flows.get(account.flowId);
         if (currentFlow) return this.publicFlow(currentFlow);
         if (!account.connectPromise) {
-            account.connectPromise = this.connect(account.credentials)
+            account.connectPromise = this.connect(account.credentials, accountId)
                 .then((result) => {
                     account.flowId = result.flowId;
-                    return result;
+                    account.status = result.status;
+                    return this.persistAccount(account).then(() => result);
+                })
+                .catch(async (error) => {
+                    if (isComdirectApiError(error)) {
+                        account.flowId = null;
+                        account.status = 'error';
+                        await this.persistAccount(account);
+                    }
+                    throw error;
                 })
                 .finally(() => {
                     account.connectPromise = null;
@@ -109,11 +191,16 @@ export class ComdirectAuthService {
         return account.connectPromise;
     }
 
-    getAccountFlowId(accountId) {
+    async getAccountFlowId(accountId) {
         const account = this.accounts.get(accountId);
         if (!account) throw new ApiError(404, 'ACCOUNT_NOT_FOUND', 'Der gespeicherte Zugang wurde nicht gefunden.');
+        if (account.status === 'error') {
+            throw new ApiError(410, 'ACCOUNT_SESSION_ENDED', 'Die Session wurde beendet und kann nicht mehr ausgewählt werden.');
+        }
         if (!this.flows.has(account.flowId)) {
             account.flowId = null;
+            account.status = 'disconnected';
+            await this.persistAccount(account);
             throw new ApiError(409, 'ACCOUNT_NOT_CONNECTED', 'Dieser Zugang hat keine aktive comdirect-Session. Bitte erneut verbinden.');
         }
         return account.flowId;
@@ -123,19 +210,23 @@ export class ComdirectAuthService {
         const account = this.accounts.get(accountId);
         if (!account) throw new ApiError(404, 'ACCOUNT_NOT_FOUND', 'Der gespeicherte Zugang wurde nicht gefunden.');
         const flowId = account.flowId;
+        let logoutError;
         try {
             if (flowId) await this.logout(flowId);
-        } finally {
-            account.credentials.clientId = '';
-            account.credentials.clientSecret = '';
-            account.credentials.username = '';
-            account.credentials.password = '';
-            this.accounts.delete(accountId);
+        } catch (error) {
+            logoutError = error;
         }
+        await this.store?.deleteAccount(accountId);
+        account.credentials.clientId = '';
+        account.credentials.clientSecret = '';
+        account.credentials.username = '';
+        account.credentials.password = '';
+        this.accounts.delete(accountId);
+        if (logoutError) throw logoutError;
         return flowId;
     }
 
-    async connect(credentials) {
+    async connect(credentials, accountId = null) {
         const { clientId, clientSecret, username, password } = credentials ?? {};
         if (![clientId, clientSecret, username, password].every((value) => typeof value === 'string' && value.trim())) {
             throw new ApiError(400, 'LOGIN_FIELDS_REQUIRED', 'Bitte Client ID, Client Secret, Benutzername und Kennwort ausfüllen.');
@@ -151,6 +242,7 @@ export class ComdirectAuthService {
         const flowId = randomUUID();
         const flow = {
             flowId,
+            accountId,
             closed: false,
             clientId: clientId.trim(),
             clientSecret,
@@ -162,14 +254,15 @@ export class ComdirectAuthService {
             session: null,
             challenge: null,
             challengeAttempts: 0,
-            failedTanAttempts: 0,
             expiryTimer: null,
         };
 
         const sessions = await this.requestJson(sessionPath, flow, { method: 'GET' });
         flow.session = listValues(sessions).find((session) => session?.identifier);
         if (!flow.session) {
-            throw new ApiError(502, 'COMDIRECT_SESSION_MISSING', 'comdirect hat keine gültige API-Session zurückgegeben.');
+            const error = new ApiError(502, 'COMDIRECT_SESSION_MISSING', 'comdirect hat keine gültige API-Session zurückgegeben.');
+            await this.endFlow(flow, error);
+            throw error;
         }
 
         if (flow.session.sessionTanActive && flow.session.activated2FA) {
@@ -179,7 +272,7 @@ export class ComdirectAuthService {
             flow.challengeAttempts = 1;
         }
 
-        this.storeFlow(flow);
+        await this.storeFlow(flow);
         return this.publicFlow(flow);
     }
 
@@ -196,40 +289,25 @@ export class ComdirectAuthService {
         };
         if (!isPushTan) headers['x-once-authentication'] = tanValue;
 
-        let response;
-        try {
-            response = await this.requestJson(`${sessionPath}/${encodeURIComponent(flow.session.identifier)}`, flow, {
-                method: 'PATCH',
-                body: {
-                    identifier: flow.session.identifier,
-                    sessionTanActive: true,
-                    activated2FA: true,
-                },
-                extraHeaders: headers,
-            });
-        } catch (error) {
-            if (error instanceof ApiError && error.status === 422 && !isPushTan) {
-                flow.failedTanAttempts += 1;
-                if (flow.failedTanAttempts >= 2) {
-                    this.removeFlow(flow);
-                    throw new ApiError(422, 'TAN_ATTEMPTS_STOPPED', 'Zwei TAN-Versuche sind fehlgeschlagen. Der Login wurde zum Schutz vor einer Kontosperre beendet.');
-                }
-            }
-            throw error;
-        }
+        const response = await this.requestJson(`${sessionPath}/${encodeURIComponent(flow.session.identifier)}`, flow, {
+            method: 'PATCH',
+            body: {
+                identifier: flow.session.identifier,
+                sessionTanActive: true,
+                activated2FA: true,
+            },
+            extraHeaders: headers,
+        });
 
         if (response?.sessionTanActive === false) {
-            throw new ApiError(409, 'TAN_NOT_ACTIVE', 'Die Session-TAN wurde noch nicht aktiviert. Bestätige die Anfrage in der photoTAN-App und versuche es erneut.');
-        }
-
-        try {
-            await this.exchangeSecondaryToken(flow);
-        } catch (error) {
-            this.removeFlow(flow);
+            const error = new ApiError(409, 'TAN_NOT_ACTIVE', 'Die Session-TAN wurde noch nicht aktiviert. Bestätige die Anfrage in der photoTAN-App und versuche es erneut.');
+            await this.endFlow(flow, error);
             throw error;
         }
 
-        this.storeFlow(flow);
+        await this.exchangeSecondaryToken(flow);
+
+        await this.storeFlow(flow);
         return this.publicFlow(flow);
     }
 
@@ -240,13 +318,14 @@ export class ComdirectAuthService {
         }
         if (tanType === flow.challenge.typ) return this.publicFlow(flow);
         if (flow.challengeAttempts >= 4) {
-            this.removeFlow(flow);
-            throw new ApiError(429, 'TAN_CHALLENGE_LIMIT', 'Zu viele TAN-Anfragen. Der Login wurde zum Schutz vor einer Kontosperre beendet.');
+            const error = new ApiError(429, 'TAN_CHALLENGE_LIMIT', 'Zu viele TAN-Anfragen. Der Login wurde zum Schutz vor einer Kontosperre beendet.');
+            await this.endFlow(flow, error);
+            throw error;
         }
 
         flow.challenge = await this.requestTanChallenge(flow, tanType);
         flow.challengeAttempts += 1;
-        this.storeFlow(flow);
+        await this.storeFlow(flow);
         return this.publicFlow(flow);
     }
 
@@ -424,14 +503,22 @@ export class ComdirectAuthService {
         if (!flow) return;
         try {
             if (flow.accessToken) {
-                await this.fetchLogged(`${this.origin}/oauth/revoke`, {
+                const response = await this.fetchLogged(`${this.origin}/oauth/revoke`, {
                     method: 'DELETE',
                     headers: { Accept: 'application/json', Authorization: `Bearer ${flow.accessToken}` },
                 });
+                if (!response.ok) {
+                    throw new ApiError(502, 'COMDIRECT_REQUEST_REJECTED', safeErrorMessage(response.status));
+                }
             }
-        } finally {
-            this.removeFlow(flow);
+        } catch (error) {
+            const apiError = error instanceof ApiError
+                ? error
+                : new ApiError(502, 'COMDIRECT_UNAVAILABLE', 'Die comdirect-API ist nicht erreichbar.');
+            await this.endFlow(flow, apiError);
+            throw apiError;
         }
+        await this.removeFlow(flow, 'disconnected');
     }
 
     async requestTanChallenge(flow, tanType) {
@@ -441,16 +528,21 @@ export class ComdirectAuthService {
             extraHeaders: tanType ? { 'x-once-authentication-info': JSON.stringify({ typ: tanType }) } : {},
             includeResponse: true,
         });
-        const challenge = parseJsonHeader(response.headers.get('x-once-authentication-info'));
-        if (!challenge?.id || !challenge?.typ) {
-            throw new ApiError(502, 'COMDIRECT_CHALLENGE_MISSING', 'comdirect hat keine TAN-Challenge zurückgegeben.');
+        try {
+            const challenge = parseJsonHeader(response.headers.get('x-once-authentication-info'));
+            if (!challenge?.id || !challenge?.typ) {
+                throw new ApiError(502, 'COMDIRECT_CHALLENGE_MISSING', 'comdirect hat keine TAN-Challenge zurückgegeben.');
+            }
+            return {
+                id: String(challenge.id),
+                typ: String(challenge.typ),
+                challenge: typeof challenge.challenge === 'string' ? challenge.challenge : null,
+                availableTypes: Array.isArray(challenge.availableTypes) ? challenge.availableTypes.filter((type) => typeof type === 'string') : [],
+            };
+        } catch (error) {
+            if (isComdirectApiError(error)) await this.endFlow(flow, error);
+            throw error;
         }
-        return {
-            id: String(challenge.id),
-            typ: String(challenge.typ),
-            challenge: typeof challenge.challenge === 'string' ? challenge.challenge : null,
-            availableTypes: Array.isArray(challenge.availableTypes) ? challenge.availableTypes.filter((type) => typeof type === 'string') : [],
-        };
     }
 
     async exchangeSecondaryToken(flow) {
@@ -459,7 +551,7 @@ export class ComdirectAuthService {
             client_secret: flow.clientSecret,
             grant_type: 'cd_secondary',
             token: flow.accessToken,
-        });
+        }, flow);
         flow.accessToken = tokens.access_token;
         flow.refreshToken = tokens.refresh_token;
         flow.expiresIn = tokens.expires_in;
@@ -468,7 +560,7 @@ export class ComdirectAuthService {
         flow.challenge = null;
     }
 
-    async requestTokens(form) {
+    async requestTokens(form, flow = null) {
         let response;
         try {
             response = await this.fetchLogged(`${this.origin}${tokenPath}`, {
@@ -477,11 +569,21 @@ export class ComdirectAuthService {
                 body: new URLSearchParams(form),
             });
         } catch {
-            throw new ApiError(502, 'COMDIRECT_UNAVAILABLE', 'Die comdirect-Token-Schnittstelle ist nicht erreichbar.');
+            const error = new ApiError(502, 'COMDIRECT_UNAVAILABLE', 'Die comdirect-Token-Schnittstelle ist nicht erreichbar.');
+            if (flow) await this.endFlow(flow, error);
+            throw error;
         }
         const data = await this.jsonBody(response);
-        if (!response.ok) throw new ApiError(401, 'COMDIRECT_TOKEN_REJECTED', safeErrorMessage(response.status));
-        if (!data?.access_token) throw new ApiError(502, 'COMDIRECT_TOKEN_MISSING', 'comdirect hat keinen Access-Token zurückgegeben.');
+        if (!response.ok) {
+            const error = new ApiError(401, 'COMDIRECT_TOKEN_REJECTED', safeErrorMessage(response.status));
+            if (flow) await this.endFlow(flow, error);
+            throw error;
+        }
+        if (!data?.access_token) {
+            const error = new ApiError(502, 'COMDIRECT_TOKEN_MISSING', 'comdirect hat keinen Access-Token zurückgegeben.');
+            if (flow) await this.endFlow(flow, error);
+            throw error;
+        }
         return data;
     }
 
@@ -508,11 +610,17 @@ export class ComdirectAuthService {
         try {
             response = await this.fetchLogged(`${this.origin}${path}`, options);
         } catch {
-            throw new ApiError(502, 'COMDIRECT_UNAVAILABLE', 'Die comdirect-API ist nicht erreichbar.');
+            const error = new ApiError(502, 'COMDIRECT_UNAVAILABLE', 'Die comdirect-API ist nicht erreichbar.');
+            await this.endFlow(flow, error);
+            throw error;
         }
         const data = await this.jsonBody(response);
-        if (!response.ok) throw new ApiError(response.status === 422 ? 422 : 502, 'COMDIRECT_REQUEST_REJECTED', safeErrorMessage(response.status));
-        if (this.flows.has(flow.flowId)) this.storeFlow(flow);
+        if (!response.ok) {
+            const error = new ApiError(response.status === 422 ? 422 : 502, 'COMDIRECT_REQUEST_REJECTED', safeErrorMessage(response.status));
+            await this.endFlow(flow, error);
+            throw error;
+        }
+        if (this.flows.has(flow.flowId)) await this.storeFlow(flow);
         return includeResponse ? { data, headers: response.headers } : data;
     }
 
@@ -609,43 +717,57 @@ export class ComdirectAuthService {
         return {
             id: account.id,
             label: account.label,
-            status: flow?.keepAliveError ? 'error' : flow?.stage ?? 'disconnected',
+            status: account.status === 'error' ? 'error' : flow?.stage ?? account.status ?? 'disconnected',
         };
     }
 
-    storeFlow(flow) {
+    async persistAccount(account) {
+        if (this.store) await this.store.saveAccount(account);
+    }
+
+    async storeFlow(flow) {
         if (flow.expiryTimer) clearTimeout(flow.expiryTimer);
         flow.expiryTimer = null;
         if (flow.keepAliveTimer) clearTimeout(flow.keepAliveTimer);
         flow.keepAliveTimer = null;
         if (flow.stage !== 'connected') {
-            flow.expiryTimer = setTimeout(() => this.removeFlow(flow), idleLifetimeMs);
+            flow.expiryTimer = setTimeout(() => {
+                this.removeFlow(flow, 'disconnected').catch((error) => {
+                    logEvent(this.logger, 'error', 'comdirect.session.persistence_failed', {
+                        flowId: flow.flowId,
+                        errorType: error instanceof Error ? error.name : 'UnknownError',
+                    });
+                });
+            }, idleLifetimeMs);
             flow.expiryTimer.unref?.();
         } else {
-            const delay = Math.max(1_000, flow.accessExpiresAt - Date.now() - refreshSkewMs);
-            flow.keepAliveTimer = setTimeout(() => {
-                flow.keepAliveTimer = null;
-                this.ensureFreshToken(flow).then(() => {
-                    flow.keepAliveError = false;
-                    if (!flow.closed && this.flows.has(flow.flowId)) this.storeFlow(flow);
-                }).catch((error) => {
-                    flow.keepAliveError = true;
-                    logEvent(this.logger, 'error', 'comdirect.token.keepalive_failed', {
-                        flowId: flow.flowId,
-                        errorCode: error instanceof ApiError ? error.code : 'TOKEN_REFRESH_FAILED',
-                    });
-                    if (!flow.closed && this.flows.has(flow.flowId)) {
-                        flow.keepAliveTimer = setTimeout(() => {
-                            flow.keepAliveTimer = null;
-                            this.storeFlow(flow);
-                        }, 30_000);
-                        flow.keepAliveTimer.unref?.();
-                    }
-                });
-            }, delay);
-            flow.keepAliveTimer.unref?.();
+            this.scheduleKeepAlive(flow, Math.max(1_000, flow.accessExpiresAt - Date.now() - refreshSkewMs));
         }
         this.flows.set(flow.flowId, flow);
+        const account = this.accounts.get(flow.accountId);
+        if (account) {
+            account.flowId = flow.flowId;
+            account.status = flow.stage;
+        }
+        if (this.store) await this.store.saveFlow(flow);
+    }
+
+    scheduleKeepAlive(flow, delay) {
+        flow.keepAliveTimer = setTimeout(async () => {
+            flow.keepAliveTimer = null;
+            try {
+                await this.ensureFreshToken(flow);
+                if (!flow.closed && this.flows.has(flow.flowId)) await this.storeFlow(flow);
+            } catch (error) {
+                if (flow.closed || !this.flows.has(flow.flowId)) return;
+                logEvent(this.logger, 'error', 'comdirect.token.keepalive_retry_scheduled', {
+                    flowId: flow.flowId,
+                    errorCode: error instanceof ApiError ? error.code : 'TOKEN_REFRESH_FAILED',
+                });
+                this.scheduleKeepAlive(flow, 30_000);
+            }
+        }, delay);
+        flow.keepAliveTimer.unref?.();
     }
 
     getFlow(flowId, expectedStage) {
@@ -655,18 +777,32 @@ export class ComdirectAuthService {
         return flow;
     }
 
-    removeFlow(flow) {
+    async endFlow(flow, error) {
+        await this.removeFlow(flow, 'error');
+        if (error instanceof ApiError) error.sessionEnded = true;
+    }
+
+    async removeFlow(flow, accountStatus = 'disconnected') {
         if (flow.expiryTimer) clearTimeout(flow.expiryTimer);
         if (flow.keepAliveTimer) clearTimeout(flow.keepAliveTimer);
         flow.closed = true;
         this.flows.delete(flow.flowId);
-        for (const account of this.accounts.values()) {
-            if (account.flowId === flow.flowId) account.flowId = null;
+        const account = this.accounts.get(flow.accountId)
+            ?? [...this.accounts.values()].find((candidate) => candidate.flowId === flow.flowId);
+        if (account) {
+            account.flowId = null;
+            account.status = accountStatus;
         }
-        flow.clientSecret = '';
-        flow.accessToken = '';
-        flow.refreshToken = '';
-        flow.clientSecret = '';
+        try {
+            if (this.store) await this.store.endFlow(flow.flowId, account?.id ?? flow.accountId, accountStatus);
+        } finally {
+            flow.clientId = '';
+            flow.clientSecret = '';
+            flow.accessToken = '';
+            flow.refreshToken = '';
+            flow.session = null;
+            flow.challenge = null;
+        }
     }
 
     async ensureFreshToken(flow) {
@@ -678,14 +814,13 @@ export class ComdirectAuthService {
                     client_secret: flow.clientSecret,
                     grant_type: 'refresh_token',
                     refresh_token: flow.refreshToken,
-                });
+                }, flow);
                 if (flow.closed) throw new ApiError(410, 'FLOW_EXPIRED', 'Der Authentifizierungsablauf ist abgemeldet oder abgelaufen.');
                 flow.accessToken = tokens.access_token;
                 flow.refreshToken = tokens.refresh_token;
                 flow.expiresIn = tokens.expires_in;
                 flow.accessExpiresAt = Date.now() + (Number(tokens.expires_in) || 599) * 1000;
-                flow.keepAliveError = false;
-                this.storeFlow(flow);
+                await this.storeFlow(flow);
             })().finally(() => {
                 flow.refreshPromise = null;
             });

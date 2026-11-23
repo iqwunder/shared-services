@@ -1,8 +1,21 @@
 import { randomUUID } from 'node:crypto';
+import mysql from 'mysql2/promise';
 import { ApiError, ComdirectAuthService } from './comdirect.mjs';
 import { logEvent, redactUrl } from './logging.mjs';
+import { DepotblickSessionStore } from './session-store.mjs';
 
-const auth = new ComdirectAuthService();
+if (!process.env.DEPOTBLICK_DATABASE_URL) {
+    throw new Error('DEPOTBLICK_DATABASE_URL muss gesetzt sein.');
+}
+const sessionStore = new DepotblickSessionStore({
+    pool: mysql.createPool(process.env.DEPOTBLICK_DATABASE_URL),
+    encryptionKey: process.env.DEPOTBLICK_SESSION_ENCRYPTION_KEY,
+});
+const auth = new ComdirectAuthService({ store: sessionStore });
+await auth.initialize();
+export async function checkDepotblickStorage() {
+    await sessionStore.check();
+}
 const authCookieName = 'depotblick-session';
 const clearAuthCookie = `${authCookieName}=; Path=/api; HttpOnly; SameSite=Strict; Max-Age=0`;
 
@@ -84,7 +97,7 @@ export async function handleDepotblickRequest(request, response) {
         }
 
         if (request.method === 'POST' && url.pathname === '/api/accounts') {
-            send(response, 201, auth.createAccount(await readJson(request)));
+            send(response, 201, await auth.createAccount(await readJson(request)));
             return;
         }
 
@@ -96,7 +109,7 @@ export async function handleDepotblickRequest(request, response) {
         }
 
         if (accountMatch && request.method === 'POST' && accountMatch[2] === 'select') {
-            const flowId = auth.getAccountFlowId(decodeURIComponent(accountMatch[1]));
+            const flowId = await auth.getAccountFlowId(decodeURIComponent(accountMatch[1]));
             send(response, 200, publicAuthResult(auth.getSession(flowId)), { 'Set-Cookie': sessionCookie(request, flowId) });
             return;
         }
@@ -220,9 +233,11 @@ export async function handleDepotblickRequest(request, response) {
             code: apiError.code,
             errorType: error instanceof Error ? error.name : 'UnknownError',
         });
-        const headers = ['FLOW_EXPIRED', 'TAN_ATTEMPTS_STOPPED'].includes(apiError.code)
+        const headers = apiError.sessionEnded || apiError.code === 'FLOW_EXPIRED'
             ? { 'Set-Cookie': clearAuthCookie }
             : {};
-        send(response, apiError.status, { code: apiError.code, message: apiError.message }, headers);
+        const errorResponse = { code: apiError.code, message: apiError.message };
+        if (apiError.sessionEnded) errorResponse.sessionEnded = true;
+        send(response, apiError.status, errorResponse, headers);
     }
 }

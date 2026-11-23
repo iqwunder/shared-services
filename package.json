@@ -5,7 +5,7 @@
   "description": "Gemeinsame REST-APIs für Bücherei, MeterPulse und Depotblick",
   "scripts": {
     "start": "node server/index.js",
-    "check": "node --check server/index.js && node --check server/depotblick/index.mjs",
+    "check": "node --check server/index.js && node --check server/depotblick/index.mjs && node --check server/depotblick/comdirect.mjs && node --check server/depotblick/session-store.mjs",
     "test:depotblick": "node --test server/depotblick/*.test.mjs"
   },
   "dependencies": {

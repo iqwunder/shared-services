@@ -36,6 +36,13 @@ const asyncRoute = (handler) => (req, res, next) => Promise.resolve(handler(req,
 
 app.use(cors({ origin: allowedOrigins }));
 const depotblickApi = import('./depotblick/index.mjs');
+depotblickApi.catch((error) => {
+    console.error(JSON.stringify({
+        event: 'depotblick.initialization_failed',
+        errorType: error instanceof Error ? error.name : 'UnknownError',
+        errorCode: error?.code ?? 'INITIALIZATION_FAILED',
+    }));
+});
 app.use((req, res, next) => {
     if (!/^\/api\/(?:auth|accounts|instruments|portfolio|depot)(?:\/|$)/.test(req.path)) return next();
     depotblickApi
@@ -206,7 +213,8 @@ function validatePvUtilityPayments(yearInput, input) {
 }
 
 app.get('/api/health', asyncRoute(async (_req, res) => {
-    await Promise.all([pool.query('SELECT 1'), booksPool.query('SELECT 1')]);
+    const { checkDepotblickStorage } = await depotblickApi;
+    await Promise.all([pool.query('SELECT 1'), booksPool.query('SELECT 1'), checkDepotblickStorage()]);
     res.json({ status: 'ok' });
 }));
 

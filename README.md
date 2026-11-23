@@ -3,12 +3,18 @@
 Dieses Node.js-Modul stellt die REST-APIs für Bücherei, MeterPulse und Depotblick
 in einem Prozess bereit. Die bisherigen API-Routen bleiben unter `/api`
 erhalten. Die Datenbankzugänge werden nur vom Service verwendet, nicht in den
-Frontends. Die Depotblick-API verwaltet comdirect-Zugangsdaten und Tokens nur
-flüchtig im Arbeitsspeicher des Service-Prozesses.
+Frontends. Depotblick speichert Zugänge und aktive Sessions verschlüsselt in
+einer eigenen Datenbank und stellt aktive Sessions nach einem Neustart wieder
+her.
 
 ## Lokal starten
 
-1. `.env.example` nach `.env` kopieren und beide Datenbank-URLs eintragen.
+1. `.env.example` nach `.env` kopieren, alle drei Datenbank-URLs eintragen und
+   für `DEPOTBLICK_SESSION_ENCRYPTION_KEY` einen stabilen 32-Byte-Schlüssel als
+   64-stellige Hex-Zeichenfolge setzen (z. B. mit
+   `node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"`).
+   Die Depotblick-Datenbank muss vorher angelegt sein; der Datenbankbenutzer
+   benötigt Rechte zum Erstellen, Lesen, Schreiben und Löschen der Sessiontabellen.
 2. In diesem Ordner ausführen:
 
    ```powershell
@@ -17,7 +23,7 @@ flüchtig im Arbeitsspeicher des Service-Prozesses.
    ```
 
 Der Dienst lauscht standardmäßig unter `http://127.0.0.1:3000`. Die lokale
-Health-Prüfung prüft beide Datenbankverbindungen:
+Health-Prüfung prüft alle drei Datenbankverbindungen:
 
 ```text
 GET http://127.0.0.1:3000/api/health
@@ -40,7 +46,12 @@ seine Node-Abhängigkeiten und kann deshalb auf dem Zielserver ohne Internetzugr
 installiert werden.
 
 Für Jenkins werden `NODEJS_24`, `DEPLOY_SSH_KEY`, `SERVICE_HOST` und die
-Credentials `meterpulse-database-url` sowie `buecherei-database-url` benötigt.
+Credentials `meterpulse-database-url`, `buecherei-database-url`,
+`depotblick-database-url` und `depotblick-session-encryption-key` benötigt.
+Der Depotblick-Datenbankbenutzer benötigt Rechte zum Erstellen und Ändern der
+beiden Depotblick-Tabellen. Der Verschlüsselungsschlüssel muss über Deployments
+hinweg stabil bleiben; bei Verlust lassen sich gespeicherte Sessions nicht
+wiederherstellen.
 Der Jenkins-Benutzer `jenkins-deploy` muss auf dem Zielserver für die im
 Jenkinsfile verwendeten `sudo`- und systemd-Befehle passwortlos berechtigt sein.
 Der Server muss Node.js unter `/usr/bin/node` bereitstellen.

@@ -2,10 +2,85 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { ComdirectAuthService } from './comdirect.mjs';
 import { redactUrl } from './logging.mjs';
+import { DepotblickSessionStore } from './session-store.mjs';
 
 function response(body, { status = 200, headers = {} } = {}) {
     return new Response(JSON.stringify(body), { status, headers });
 }
+
+class MemorySessionStore {
+    constructor() {
+        this.accounts = new Map();
+        this.sessions = new Map();
+    }
+
+    async initialize() {
+        return {
+            accounts: [...this.accounts.values()].map((account) => structuredClone(account)),
+            flows: [...this.sessions.values()]
+                .filter((session) => session.status !== 'ended')
+                .map((session) => structuredClone(session)),
+        };
+    }
+
+    async saveAccount(account) {
+        this.accounts.set(account.id, {
+            id: account.id,
+            label: account.label,
+            credentials: structuredClone(account.credentials),
+            status: account.status,
+            flowId: account.flowId,
+        });
+    }
+
+    async saveFlow(flow) {
+        const payload = {
+            flowId: flow.flowId,
+            accountId: flow.accountId ?? null,
+            clientId: flow.clientId,
+            clientSecret: flow.clientSecret,
+            accessToken: flow.accessToken,
+            refreshToken: flow.refreshToken,
+            expiresIn: flow.expiresIn,
+            accessExpiresAt: flow.accessExpiresAt,
+            stage: flow.stage,
+            session: flow.session,
+            challenge: flow.challenge,
+            challengeAttempts: flow.challengeAttempts,
+        };
+        this.sessions.set(flow.flowId, {
+            flowId: flow.flowId,
+            accountId: flow.accountId ?? null,
+            status: flow.stage,
+            payload: structuredClone(payload),
+        });
+    }
+
+    async endFlow(flowId, accountId, accountStatus) {
+        this.sessions.set(flowId, { flowId, accountId, status: 'ended', payload: null });
+        const account = this.accounts.get(accountId);
+        if (account) {
+            account.flowId = null;
+            account.status = accountStatus;
+        }
+    }
+
+    async deleteAccount(accountId) {
+        this.accounts.delete(accountId);
+    }
+}
+
+test('encrypts saved authentication data at rest', () => {
+    const store = new DepotblickSessionStore({ pool: {}, encryptionKey: 'a'.repeat(64) });
+    const encrypted = store.encrypt({ clientSecret: 'secret-value', refreshToken: 'refresh-value' });
+
+    assert.equal(encrypted.includes('secret-value'), false);
+    assert.equal(encrypted.includes('refresh-value'), false);
+    assert.deepEqual(store.decrypt(encrypted), {
+        clientSecret: 'secret-value',
+        refreshToken: 'refresh-value',
+    });
+});
 
 test('runs password grant, Push-TAN activation, cd_secondary and live portfolio requests', async () => {
     const requests = [];
@@ -103,10 +178,10 @@ test('keeps multiple account credentials server-side and exposes only labels and
         },
     });
 
-    const first = service.createAccount({
+    const first = await service.createAccount({
         label: 'Privat', clientId: 'client-1', clientSecret: 'secret-1', username: 'user-1', password: 'pin-1',
     });
-    const second = service.createAccount({
+    const second = await service.createAccount({
         label: 'Gemeinsam', clientId: 'client-2', clientSecret: 'secret-2', username: 'user-2', password: 'pin-2',
     });
     assert.deepEqual(service.listAccounts(), [
@@ -127,7 +202,7 @@ test('keeps multiple account credentials server-side and exposes only labels and
         { label: 'Gemeinsam', status: 'tan-required', active: false },
     ]);
 
-    const firstFlowId = service.getAccountFlowId(first.id);
+    const firstFlowId = await service.getAccountFlowId(first.id);
     await service.deleteAccount(first.id);
     assert.equal(service.flows.has(firstFlowId), false);
     assert.equal(service.listAccounts().length, 1);
@@ -156,7 +231,7 @@ test('loads sorted historical depot values for a validated period', async () => 
         flowId: 'history-flow', clientId: 'id', clientSecret: 'secret', accessToken: 'access',
         refreshToken: 'refresh', accessExpiresAt: Date.now() + 10 * 60_000, stage: 'connected', expiryTimer: null,
     };
-    service.storeFlow(flow);
+    await service.storeFlow(flow);
 
     const values = await service.getHistoricalDepotValues(flow.flowId, '1W');
     assert.equal(requests[1].url, 'https://comdirect.test/api/brokerage/v3/depots/depot-id/historicaldepotvalues?period=1W');
@@ -165,7 +240,7 @@ test('loads sorted historical depot values for a validated period', async () => 
         { bookingDay: '2026-09-28', depotValue: 1250.5, purchaseValue: 1100 },
     ]);
     await assert.rejects(service.getHistoricalDepotValues(flow.flowId, '2W'), { code: 'INVALID_HISTORY_PERIOD' });
-    service.removeFlow(flow);
+    await service.removeFlow(flow);
 });
 
 test('searches instruments and loads detail, price history, and profiles', async () => {
@@ -192,7 +267,7 @@ test('searches instruments and loads detail, price history, and profiles', async
         flowId: 'instrument-flow', clientId: 'id', clientSecret: 'secret', accessToken: 'access',
         refreshToken: 'refresh', accessExpiresAt: Date.now() + 10 * 60_000, stage: 'connected', expiryTimer: null,
     };
-    service.storeFlow(flow);
+    await service.storeFlow(flow);
 
     assert.deepEqual(await service.searchInstruments(flow.flowId, 'test etf'), [{ wkn: 'ETF01', name: 'Test ETF' }]);
     const detail = await service.getInstrument(flow.flowId, 'ETF01');
@@ -214,7 +289,7 @@ test('searches instruments and loads detail, price history, and profiles', async
     assert.equal(profiles.keyFigures[0].name, 'KGV');
     await assert.rejects(service.searchInstruments(flow.flowId, ' '), { code: 'SEARCH_TERM_REQUIRED' });
     await assert.rejects(service.getInstrumentPrices(flow.flowId, 'ETF01', '5YEAR'), { code: 'INVALID_INSTRUMENT_PRICE_PERIOD' });
-    service.removeFlow(flow);
+    await service.removeFlow(flow);
 });
 
 test('loads interval performance and aggregated analyst analyses', async () => {
@@ -241,7 +316,7 @@ test('loads interval performance and aggregated analyst analyses', async () => {
         flowId: 'instrument-analysis-flow', clientId: 'id', clientSecret: 'secret', accessToken: 'access',
         refreshToken: 'refresh', accessExpiresAt: Date.now() + 10 * 60_000, stage: 'connected', expiryTimer: null,
     };
-    service.storeFlow(flow);
+    await service.storeFlow(flow);
 
     const performance = await service.getInstrumentPerformance(flow.flowId, 'ETF01', '1WEEK');
     const analyses = await service.getInstrumentAnalyses(flow.flowId, 'ETF01', '1YEAR');
@@ -263,7 +338,7 @@ test('loads interval performance and aggregated analyst analyses', async () => {
     await assert.rejects(service.getInstrumentAnalyses(flow.flowId, 'ETF01', '5YEARS'), {
         code: 'INVALID_INSTRUMENT_ANALYSIS_PERIOD',
     });
-    service.removeFlow(flow);
+    await service.removeFlow(flow);
 });
 
 test('loads only instrumentPrice for ORB observations', async () => {
@@ -287,7 +362,7 @@ test('loads only instrumentPrice for ORB observations', async () => {
         flowId: 'orb-price-flow', clientId: 'id', clientSecret: 'secret', accessToken: 'access',
         refreshToken: 'refresh', accessExpiresAt: Date.now() + 10 * 60_000, stage: 'connected', expiryTimer: null,
     };
-    service.storeFlow(flow);
+    await service.storeFlow(flow);
 
     const detail = await service.getInstrumentPrice(flow.flowId, 'WKN123');
     const requestedUrl = new URL(requests[0].url);
@@ -298,7 +373,7 @@ test('loads only instrumentPrice for ORB observations', async () => {
     assert.equal(requestLog.finalUrl, 'https://comdirect.test/api/brokerage/v1/instruments/WKN123?with-attr=instrumentPrice');
     assert.equal(requestLog.status, 200);
     assert.equal(JSON.stringify(logs).includes('Bearer'), false);
-    service.removeFlow(flow);
+    await service.removeFlow(flow);
 });
 
 test('redacts session identifiers and sensitive URL parameters from logs', () => {
@@ -343,7 +418,7 @@ test('refreshes expiring tokens with the documented refresh_token grant and rota
         stage: 'connected',
         expiryTimer: null,
     };
-    service.storeFlow(flow);
+    await service.storeFlow(flow);
 
     await service.ensureFreshToken(flow);
     const form = new URLSearchParams(tokenRequest.options.body);
@@ -356,7 +431,7 @@ test('refreshes expiring tokens with the documented refresh_token grant and rota
     assert.ok(flow.accessExpiresAt > Date.now());
     assert.equal(service.publicFlow(flow).clientSecret, undefined);
 
-    service.removeFlow(flow);
+    await service.removeFlow(flow);
     assert.equal(flow.clientSecret, '');
     assert.equal(flow.refreshToken, '');
 });
@@ -381,7 +456,7 @@ test('restores a connected flow and refreshes its token during keepalive before 
         stage: 'connected',
         expiryTimer: null,
     };
-    service.storeFlow(flow);
+    await service.storeFlow(flow);
 
     assert.equal(service.getSession(flow.flowId).status, 'connected');
     await service.keepAlive(flow.flowId);
@@ -397,6 +472,98 @@ test('restores a connected flow and refreshes its token during keepalive before 
 
     await service.logout(flow.flowId);
     assert.equal(service.flows.has(flow.flowId), false);
+});
+
+test('restores persisted sessions after restart and keeps their tokens alive', async () => {
+    const store = new MemorySessionStore();
+    const firstService = new ComdirectAuthService({ store, fetchImpl: async () => { throw new Error('unexpected request'); } });
+    await firstService.initialize();
+    const account = await firstService.createAccount({
+        label: 'Privat',
+        clientId: 'client-id',
+        clientSecret: 'client-secret',
+        username: 'user',
+        password: 'pin',
+    });
+    const flow = {
+        flowId: 'restored-flow',
+        accountId: account.id,
+        clientId: 'client-id',
+        clientSecret: 'client-secret',
+        accessToken: 'expired-access',
+        refreshToken: 'current-refresh',
+        expiresIn: 599,
+        accessExpiresAt: Date.now() - 1,
+        stage: 'connected',
+        session: { identifier: 'bank-session' },
+        challenge: null,
+        challengeAttempts: 1,
+        expiryTimer: null,
+    };
+    await firstService.storeFlow(flow);
+    clearTimeout(flow.keepAliveTimer);
+    firstService.flows.delete(flow.flowId);
+
+    let refreshStarted;
+    const refreshStartedPromise = new Promise((resolve) => { refreshStarted = resolve; });
+    const restoredService = new ComdirectAuthService({
+        store,
+        fetchImpl: async (url, options) => {
+            assert.equal(String(url), 'https://api.comdirect.de/oauth/token');
+            assert.equal(new URLSearchParams(options.body).get('refresh_token'), 'current-refresh');
+            refreshStarted();
+            return response({ access_token: 'restored-access', refresh_token: 'rotated-refresh', expires_in: 599 });
+        },
+    });
+    await restoredService.initialize();
+    await refreshStartedPromise;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    assert.deepEqual(restoredService.listAccounts(), [
+        { id: account.id, label: 'Privat', status: 'connected', active: false },
+    ]);
+    assert.equal(store.sessions.get(flow.flowId).payload.accessToken, 'restored-access');
+    await restoredService.removeFlow(restoredService.flows.get(flow.flowId));
+});
+
+test('marks failed comdirect sessions ended and prevents account selection', async () => {
+    const store = new MemorySessionStore();
+    const service = new ComdirectAuthService({
+        store,
+        fetchImpl: async () => response({}, { status: 503 }),
+    });
+    await service.initialize();
+    const account = await service.createAccount({
+        label: 'Privat',
+        clientId: 'client-id',
+        clientSecret: 'client-secret',
+        username: 'user',
+        password: 'pin',
+    });
+    const flow = {
+        flowId: 'failed-flow',
+        accountId: account.id,
+        clientId: 'client-id',
+        clientSecret: 'client-secret',
+        accessToken: 'access-token',
+        refreshToken: 'refresh-token',
+        accessExpiresAt: Date.now() + 10 * 60_000,
+        stage: 'connected',
+        session: { identifier: 'bank-session' },
+        challenge: null,
+        expiryTimer: null,
+    };
+    await service.storeFlow(flow);
+
+    await assert.rejects(service.getPortfolio(flow.flowId), {
+        code: 'COMDIRECT_REQUEST_REJECTED',
+        sessionEnded: true,
+    });
+    assert.equal(service.flows.has(flow.flowId), false);
+    assert.equal(store.sessions.get(flow.flowId).status, 'ended');
+    assert.equal(store.sessions.get(flow.flowId).payload, null);
+    assert.equal(service.listAccounts()[0].status, 'error');
+    await assert.rejects(service.getAccountFlowId(account.id), { code: 'ACCOUNT_SESSION_ENDED' });
 });
 
 test('refreshes connected flows in the server process without a browser keepalive request', async () => {
@@ -422,7 +589,7 @@ test('refreshes connected flows in the server process without a browser keepaliv
         expiryTimer: null,
         keepAliveTimer: null,
     };
-    service.storeFlow(flow);
+    await service.storeFlow(flow);
 
     await refreshStartedPromise;
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -430,7 +597,7 @@ test('refreshes connected flows in the server process without a browser keepaliv
     assert.equal(new URLSearchParams(refreshRequest.options.body).get('grant_type'), 'refresh_token');
     assert.equal(flow.accessToken, 'background-access');
     assert.equal(flow.refreshToken, 'background-refresh');
-    service.removeFlow(flow);
+    await service.removeFlow(flow);
 });
 
 test('shares one refresh request across concurrent API calls', async () => {
@@ -448,7 +615,7 @@ test('shares one refresh request across concurrent API calls', async () => {
         accessToken: 'expired', refreshToken: 'refresh', expiresIn: 0,
         accessExpiresAt: Date.now() - 1, stage: 'connected', expiryTimer: null,
     };
-    service.storeFlow(flow);
+    await service.storeFlow(flow);
 
     const first = service.ensureFreshToken(flow);
     const second = service.ensureFreshToken(flow);
@@ -457,10 +624,10 @@ test('shares one refresh request across concurrent API calls', async () => {
     await Promise.all([first, second]);
     assert.equal(calls, 1);
     assert.equal(flow.accessToken, 'fresh');
-    service.removeFlow(flow);
+    await service.removeFlow(flow);
 });
 
-test('stops after two rejected TAN entries before the bank can lock the account', async () => {
+test('ends a session after a rejected TAN API request', async () => {
     const replies = [
         response({ access_token: 'two-factor-token', expires_in: 599 }),
         response([{ identifier: 'session-id', sessionTanActive: false }]),
@@ -472,6 +639,6 @@ test('stops after two rejected TAN entries before the bank can lock the account'
     const login = await service.connect({ clientId: 'id', clientSecret: 'secret', username: 'user', password: 'pin' });
 
     await assert.rejects(service.confirm({ flowId: login.flowId, tan: '000000' }), { code: 'COMDIRECT_REQUEST_REJECTED' });
-    await assert.rejects(service.confirm({ flowId: login.flowId, tan: '111111' }), { code: 'TAN_ATTEMPTS_STOPPED' });
+    await assert.rejects(service.confirm({ flowId: login.flowId, tan: '111111' }), { code: 'FLOW_EXPIRED' });
     assert.equal(service.flows.has(login.flowId), false);
 });
