@@ -61,7 +61,7 @@ pipeline {
                                 printf 'API_PORT=3000\\n'
                                 printf 'DATABASE_URL=%s\\n' "$METERPULSE_DATABASE_URL"
                                 printf 'BUECHEREI_DATABASE_URL=%s\\n' "$BUECHEREI_DATABASE_URL"
-                                printf 'CORS_ORIGIN=%s\\n' "$CORS_ORIGINS"
+                                printf 'CORS_ORIGIN=%s\\n' "${CORS_ORIGINS}"
                             } > "$service_env"
                             scp $ssh_options services.tar.gz "jenkins-deploy@${SERVICE_HOST}:/tmp/shared-services-${BUILD_NUMBER}.tar.gz"
                             scp $ssh_options "$service_env" "jenkins-deploy@${SERVICE_HOST}:/tmp/shared-services-${BUILD_NUMBER}.env"
