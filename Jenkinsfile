@@ -12,7 +12,6 @@ pipeline {
 
     parameters {
         booleanParam(name: 'DEPLOY', defaultValue: false, description: 'Soll der gemeinsame Service deployed werden?')
-        string(name: 'DATABASE_SERVER_IP', defaultValue: '', description: 'Interne Adresse des Datenbankservers')
         string(name: 'CORS_ORIGINS', defaultValue: '', description: 'Kommagetrennte Frontend-Ursprünge')
     }
 
