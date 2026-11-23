@@ -1,0 +1,19 @@
+[Unit]
+Description=Shared REST APIs for MeterPulse and Buecherei
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=shared-services
+Group=shared-services
+WorkingDirectory=/opt/shared-services
+EnvironmentFile=/opt/shared-services/.env
+ExecStart=/usr/bin/node /opt/shared-services/server/index.js
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

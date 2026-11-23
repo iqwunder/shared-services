@@ -1,0 +1,18 @@
+{
+  "name": "shared-database-services",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Gemeinsame REST-APIs für Bücherei und MeterPulse",
+  "scripts": {
+    "start": "node server/index.js",
+    "check": "node --check server/index.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.6",
+    "csv-parse": "^7.0.3",
+    "dotenv": "^18.0.10",
+    "express": "^5.3.0",
+    "multer": "^2.5.0",
+    "mysql2": "^3.24.6"
+  }
+}
