@@ -47,7 +47,7 @@ pipeline {
                         sh '''
                             set +x
                             set -eu
-                            : "${DATABASE_SERVER_IP:?DATABASE_SERVER_IP muss gesetzt sein}"
+                            : "${SERVICE_HOST:?SERVICE_HOSTmuss gesetzt sein}"
                             : "${CORS_ORIGINS:?CORS_ORIGINS muss gesetzt sein}"
                             : "${METERPULSE_DATABASE_URL:?Das MeterPulse-Datenbank-Credential ist leer}"
                             : "${BUECHEREI_DATABASE_URL:?Das Bücherei-Datenbank-Credential ist leer}"
