@@ -45,7 +45,9 @@ pipeline {
                         string(credentialsId: 'buecherei-database-url', variable: 'BUECHEREI_DATABASE_URL')
                     ]) {
                         sh '''
+                        echo "Starting deployment script"
                             set +x
+                            echo "Setting up deployment environment"
                             set -eu
                             : "${SERVICE_HOST:?SERVICE_HOSTmuss gesetzt sein}"
                             : "${CORS_ORIGINS:?CORS_ORIGINS muss gesetzt sein}"
