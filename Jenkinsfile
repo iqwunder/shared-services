@@ -72,14 +72,25 @@ pipeline {
                     archive="/tmp/shared-services-${build_number}.tar.gz"
                     service_env="/tmp/shared-services-${build_number}.env"
                     trap 'rm -f "$archive" "$service_env"' EXIT
+                    echo "Deploying shared-services with build number $build_number"
                     sudo -n id shared-services >/dev/null 2>&1 || sudo -n useradd --system --no-create-home --shell /usr/sbin/nologin shared-services
+                    echo "Ensuring shared-services user exists"
                     sudo -n mkdir -p /opt/shared-services
+                    echo "Ensuring /opt/shared-services directory exists"
                     sudo -n tar -xzf "$archive" -C /opt/shared-services
+                    echo "Extracted shared-services archive"
                     sudo -n install -o shared-services -g shared-services -m 600 "$service_env" /opt/shared-services/.env
+                    echo "Installed shared-services environment file"
+                    echo "Setting ownership and permissions for shared-services directory"                    
                     sudo -n chown -R shared-services:shared-services /opt/shared-services
+                    echo "Ownership and permissions set for shared-services directory"
+                    echo "Installing shared-services systemd service"
                     sudo -n install -m 644 /opt/shared-services/server/shared-services.service /etc/systemd/system/shared-services.service
+                    echo "Reloading systemd daemon"
                     sudo -n systemctl daemon-reload
+                    echo "Enabling shared-services service"
                     sudo -n systemctl enable shared-services
+                    echo "Restarting shared-services service"
                     sudo -n systemctl restart shared-services
                     curl --fail --silent --show-error --retry 10 --retry-connrefused --retry-delay 1 http://127.0.0.1:3000/api/health
 REMOTE
