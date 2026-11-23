@@ -1,5 +1,5 @@
 [Unit]
-Description=Shared REST APIs for MeterPulse and Buecherei
+Description=Shared REST APIs for MeterPulse, Buecherei and Depotblick
 After=network-online.target
 Wants=network-online.target
 

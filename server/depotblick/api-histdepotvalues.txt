@@ -1,0 +1,32 @@
+URL: 
+GET /brokerage/v3/depots/{depotId}/historicaldepotvalues
+
+ 
+
+Parameter|
+
+Path-Parameter:
+depotId:String
+	DepotId (UUID)
+	
+
+Parameter
+		
+period:String (z.B. 5Y, 6M, 30D)
+Period Values:
+1W (Eine Woche)
+1M (Ein Monat)
+3M (3 Monate)
+1Y (1 Jahr)
+5Y (5 Jahre)
+10Y (10 Jahre)
+
+Response:
+
+Typ: HistoricalDepotValues
+
+Values:
+bookingDay:DateString = form: yyyy-MM-dd
+
+depotValue: $AmountValue = Depotwert an diesem Buchungstag
+purchaseValue: $AmountValue = Kaufwert an diesem Buchungstag

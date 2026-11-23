@@ -35,6 +35,13 @@ const unitFor = (utility) => utility === 'electricity' ? 'kWh' : 'm³';
 const asyncRoute = (handler) => (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
 
 app.use(cors({ origin: allowedOrigins }));
+const depotblickApi = import('./depotblick/index.mjs');
+app.use((req, res, next) => {
+    if (!/^\/api\/(?:auth|accounts|instruments|portfolio|depot)(?:\/|$)/.test(req.path)) return next();
+    depotblickApi
+        .then(({ handleDepotblickRequest }) => handleDepotblickRequest(req, res))
+        .catch(next);
+});
 app.use(express.json({ limit: '1mb' }));
 
 function validDate(value) {

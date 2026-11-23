@@ -1,13 +1,15 @@
 # Gemeinsame Datenbank-Services
 
-Dieses Node.js-Modul stellt die REST-APIs für Bücherei und MeterPulse in einem
-Prozess bereit. Die bisherigen API-Routen bleiben unter `/api` erhalten. Die
-Datenbankzugänge werden nur vom Service verwendet, nicht in den Frontends.
+Dieses Node.js-Modul stellt die REST-APIs für Bücherei, MeterPulse und Depotblick
+in einem Prozess bereit. Die bisherigen API-Routen bleiben unter `/api`
+erhalten. Die Datenbankzugänge werden nur vom Service verwendet, nicht in den
+Frontends. Die Depotblick-API verwaltet comdirect-Zugangsdaten und Tokens nur
+flüchtig im Arbeitsspeicher des Service-Prozesses.
 
 ## Lokal starten
 
 1. `.env.example` nach `.env` kopieren und beide Datenbank-URLs eintragen.
-2. Im Ordner `services` ausführen:
+2. In diesem Ordner ausführen:
 
    ```powershell
    npm.cmd ci
@@ -21,6 +23,10 @@ Health-Prüfung prüft beide Datenbankverbindungen:
 GET http://127.0.0.1:3000/api/health
 ```
 
+Die Depotblick-Routen (`/api/auth`, `/api/accounts`, `/api/instruments`,
+`/api/portfolio` und `/api/depot`) werden vom selben Prozess bedient. API-Tests
+für die comdirect-Anbindung laufen mit `npm.cmd run test:depotblick`.
+
 In MeterPulse und Bücherei werden API-Aufrufe lokal durch den jeweiligen
 Angular-Entwicklungsserver an Port 3000 weitergeleitet. Bücherei verwendet
 standardmäßig Port 4300, MeterPulse Port 4200.
@@ -28,11 +34,12 @@ standardmäßig Port 4300, MeterPulse Port 4200.
 ## Deployment
 
 Der Jenkinsfile in diesem Ordner baut und deployed den gemeinsamen Service als
-ein Paket nach `/opt/shared-services` auf den Datenbankserver. Das Paket enthält
+ein Paket nach `/opt/shared-services` auf den Datenbankserver. Dazu gehören auch
+die Depotblick-API-Quellen und ihre Tests. Das Paket enthält
 seine Node-Abhängigkeiten und kann deshalb auf dem Zielserver ohne Internetzugriff
 installiert werden.
 
-Für Jenkins werden `NODEJS_24`, `DEPLOY_SSH_KEY`, `DATABASE_SERVER_IP` und die
+Für Jenkins werden `NODEJS_24`, `DEPLOY_SSH_KEY`, `SERVICE_HOST` und die
 Credentials `meterpulse-database-url` sowie `buecherei-database-url` benötigt.
 Der Jenkins-Benutzer `jenkins-deploy` muss auf dem Zielserver für die im
 Jenkinsfile verwendeten `sudo`- und systemd-Befehle passwortlos berechtigt sein.
@@ -44,6 +51,8 @@ interne Netz beschränken; der Port darf nicht aus dem Internet erreichbar sein.
 `CORS_ORIGINS` muss die Ursprünge der bereitgestellten Frontends enthalten.
 
 Die Frontend-Jenkinsfiles benötigen bei einem Deployment den Parameter
-`SERVICE_API_URL`, zum Beispiel `http://dbserver.intern:3000`. Dieser Wert wird
-als Laufzeitkonfiguration in das jeweilige Frontend geschrieben; ein erneuter
-Frontend-Build ist bei einer URL-Änderung nicht erforderlich.
+`SERVICE_API_URL`, zum Beispiel `http://dbserver.intern:3000`. Angular ruft die
+API same-origin über `/api/` auf; der Nginx-Reverse-Proxy auf dem jeweiligen
+Frontend-Server leitet den Aufruf an diese interne Service-URL weiter. Der
+Service-Port muss daher vom Frontend-Server erreichbar sein, aber nicht direkt
+aus dem Browser oder dem Internet.

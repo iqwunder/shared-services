@@ -2,10 +2,11 @@
   "name": "shared-database-services",
   "version": "1.0.0",
   "private": true,
-  "description": "Gemeinsame REST-APIs für Bücherei und MeterPulse",
+  "description": "Gemeinsame REST-APIs für Bücherei, MeterPulse und Depotblick",
   "scripts": {
     "start": "node server/index.js",
-    "check": "node --check server/index.js"
+    "check": "node --check server/index.js && node --check server/depotblick/index.mjs",
+    "test:depotblick": "node --test server/depotblick/*.test.mjs"
   },
   "dependencies": {
     "cors": "^2.8.6",
