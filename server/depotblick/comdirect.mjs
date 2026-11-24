@@ -524,7 +524,7 @@ export class ComdirectAuthService {
     async requestTanChallenge(flow, tanType) {
         const response = await this.requestJson(`${sessionPath}/${encodeURIComponent(flow.session.identifier)}/validate`, flow, {
             method: 'POST',
-            body: { identifier: flow.session.identifier, sessionTanActive: true, activated2FA: true },
+            body: { identifier: flow.session.identifier, sessionTanActive: false, activated2FA: true },
             extraHeaders: tanType ? { 'x-once-authentication-info': JSON.stringify({ typ: tanType }) } : {},
             includeResponse: true,
         });
